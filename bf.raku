@@ -68,21 +68,6 @@ $code = $*IN.slurp without $code;
 
 $code ~~ / <-[ -+<>,. \[ \] \s ]> / and die "invalid char found in BF code: {$/.Str.raku} at offset {$/.from}\n";
 
-grammar BF {
-    token TOP      { <fragments>           }
-    rule fragments { [ <flow> || <loop> ]* }
-    rule flow      { <[ -+<>,. ]>+         }
-    rule loop      { '[' <fragments> ']'   }
-}
-#class BF {
-#    method TOP ($/)       {  }
-#    method fragments ($/) {  }
-#    #method flow ($/)      {  }
-#    method loop ($/)      { make $<fragments>.made }
-#}
-my $bf = BF.subparse($code) or die "parse failure\n";
-$bf.to == $code.chars or die "invalid [ ] nesting at offset {$bf.to}\n";
-
 sub hex2(Int:D $i --> Str:D) { $i.fmt("%02X") }
 
 sub dump-char(Int:D $i --> Str:D) {
@@ -137,36 +122,59 @@ my class Memory {
     method current () { @!data[$!p]; }
 }
 
-my $memo = Memory.new(:$len, :$debug, :$dump-ctx);
+my class Flow {
+    has @.op;
 
-sub run-flow(Match $flow) {
-    for $flow.Str.split("", :skip-empty) {
-        {
-            when "+" { $memo.inc; }
-            when "-" { $memo.dec; }
-            when "<" { $memo.prev; }
-            when ">" { $memo.next; }
-            when "." { $memo.out; }
-            when "," { $memo.in; }
-            default  { next }
+    method run(Memory $memo) {
+        for @!op {
+            {
+                when "+" { $memo.inc; }
+                when "-" { $memo.dec; }
+                when "<" { $memo.prev; }
+                when ">" { $memo.next; }
+                when "." { $memo.out; }
+                when "," { $memo.in; }
+            }
+            $memo.dump(.self);
         }
-        $memo.dump(.self);
+    }
+}
+my class Loop {
+    has $.f;
+
+    method run(Memory $memo) {
+        while $memo.current {
+            $!f.run($memo);
+        }
+    }
+}
+my class Fragments {
+    has @.fragments;
+
+    method run(Memory $memo) {
+        for @!fragments {
+            .run($memo);
+        }
     }
 }
 
-sub run-loop(Match $loop) {
-    while $memo.current {
-        run-fragments($loop<fragments>);
-    }
+grammar G {
+    token TOP      { <fragments>          }
+    rule fragments { <fragment>*          }
+    rule fragment  { <flow> || <loop>     }
+    rule flow      { <[ -+<>,. ]>+        }
+    rule loop      { '[' <fragments> ']'  }
 }
-
-sub run-fragments(Match $fragments) {
-    for $fragments.caps {
-        when defined .<flow> { run-flow(.<flow>) }
-        when defined .<loop> { run-loop(.<loop>) }
-        default { warn .self; die "unexpected match" }
-    }
+class BF {
+    method TOP ($/)       { make $<fragments>.made }
+    method fragments ($/) { make Fragments.new(fragments => $<fragment>.list>>.made) }
+    method fragment ($/)  { make ($<flow> // $<loop>).made }
+    method flow ($/)      { make Flow.new(op => $/.Str.split('', :skip-empty)) }
+    method loop ($/)      { make Loop.new(f => $<fragments>.made) }
 }
+my $bf = G.subparse($code, actions => BF.new) or die "parse failure\n";
+$bf.to == $code.chars or die "invalid [ ] nesting at offset {$bf.to}\n";
 
+my $memo = Memory.new(:$len, :$debug, :$dump-ctx);
 $memo.dump;
-run-fragments($bf<fragments>);
+$bf.made.run($memo);
