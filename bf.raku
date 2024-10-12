@@ -27,7 +27,7 @@ use v6.d;
 my Int:D $len = 1 +< 20;
 my Int:D $dump-ctx = 20;
 my Str $code;
-my Bool:D $dump = False;
+my Bool:D $debug = False;
 # Getopt::Std? Nah! It's excersize.
 while @*ARGS.elems {
     my Str:D $arg = @*ARGS[0];
@@ -50,7 +50,7 @@ while @*ARGS.elems {
             $code = @*ARGS[0];
         }
         when "-D" {
-            $dump = True;
+            $debug = True;
         }
         when "--" {
             @*ARGS.shift;
@@ -83,9 +83,6 @@ grammar BF {
 my $bf = BF.subparse($code) or die "parse failure\n";
 $bf.to == $code.chars or die "invalid [ ] nesting at offset {$bf.to}\n";
 
-my uint8 @data[$len] = 0 xx $len;
-my Int:D $p = 0;
-
 sub hex2(Int:D $i --> Str:D) { $i.fmt("%02X") }
 
 sub dump-char(Int:D $i --> Str:D) {
@@ -93,26 +90,6 @@ sub dump-char(Int:D $i --> Str:D) {
         return .chr when 0x20 .. 0x7E;
         return ' ';
     }
-}
-
-sub dump(Str $caused = Str) {
-    return unless $dump;
-
-    my $from = $p - $dump-ctx max 0;
-    my $to   = $p + $dump-ctx min $len - 1;
-    my $s = '{';
-    $s ~= "...[$from]" if $from;
-    for $from .. $to -> $i {
-        $s ~= " ";
-        $s ~= do given hex2(@data[$i]) {
-            when $i == $p { "<{.self}>" }
-            default       { .self }
-        };
-    }
-    $s ~= "..." if $to < $len - 1;
-    $s ~= ' }';
-    my $c = @data[$p];
-    $*ERR.say: "{$caused // ' '} [$p] {$c.fmt("%3d")} | {hex2($c)} | {dump-char($c)} | $s";
 }
 
 sub read-char( --> uint8) {
@@ -123,23 +100,62 @@ sub read-char( --> uint8) {
     }
 }
 
+my class Memory {
+    has Int:D  $.len is required;
+    has Bool:D $.debug = False;
+    has Int:D  $.dump-ctx is rw = 20;
+
+    has uint8  @!data = 0 xx $!len;
+    has Int:D  $!p = 0;
+
+    method dump(Str $caused = Str) {
+        return unless $!debug;
+
+        my $from = $!p - $!dump-ctx max 0;
+        my $to   = $!p + $!dump-ctx min $!len - 1;
+        my $s = '{';
+        $s ~= "...[$from]" if $from;
+        for $from .. $to -> $i {
+            $s ~= " ";
+            $s ~= do given hex2(@!data[$i]) {
+                when $i == $!p { "<{.self}>" }
+                default        { .self }
+            };
+        }
+        $s ~= "..." if $to < $!len - 1;
+        $s ~= ' }';
+        my $c = @!data[$!p];
+        $*ERR.say: "{$caused // ' '} [$!p] {$c.fmt("%3d")} | {hex2($c)} | {dump-char($c)} | $s";
+    }
+
+    method inc()  { @!data[$!p]++; }
+    method dec()  { @!data[$!p]--; }
+    method next() { $!p++; $!p < $!len or $!p = 0; }
+    method prev() { $!p--; $!p >= 0    or $!p = $!len - 1; }
+    method out()  { @!data[$!p].chr.print; }
+    method in()   { @!data[$!p] = read-char; }
+    method current () { @!data[$!p]; }
+}
+
+my $memo = Memory.new(:$len, :$debug, :$dump-ctx);
+
 sub run-flow(Match $flow) {
     for $flow.Str.split("", :skip-empty) {
         {
-            when "+" { @data[$p]++; }
-            when "-" { @data[$p]--; }
-            when "<" { $p--; $p >= 0   or $p = $len - 1; }
-            when ">" { $p++; $p < $len or $p = 0; }
-            when "." { @data[$p].chr.print; }
-            when "," { @data[$p] = read-char(); }
+            when "+" { $memo.inc; }
+            when "-" { $memo.dec; }
+            when "<" { $memo.prev; }
+            when ">" { $memo.next; }
+            when "." { $memo.out; }
+            when "," { $memo.in; }
             default  { next }
         }
-        dump(.self);
+        $memo.dump(.self);
     }
 }
 
 sub run-loop(Match $loop) {
-    while @data[$p] {
+    while $memo.current {
         run-fragments($loop<fragments>);
     }
 }
@@ -152,5 +168,5 @@ sub run-fragments(Match $fragments) {
     }
 }
 
-dump();
+$memo.dump;
 run-fragments($bf<fragments>);
